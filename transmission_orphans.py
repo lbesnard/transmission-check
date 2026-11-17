@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -51,6 +52,36 @@ BOLD = lambda t: c(t, "1")
 
 def die(msg):
     sys.exit(RED(f"error: {msg}"))
+
+
+_last_status = 0.0
+_status_shown = False
+
+
+def status(msg, force=False):
+    """Transient one-line progress on stderr (only on a terminal, throttled)."""
+    global _last_status, _status_shown
+    if not sys.stderr.isatty():
+        return
+    now = time.monotonic()
+    if force or now - _last_status > 0.1:
+        _last_status = now
+        _status_shown = True
+        sys.stderr.write("\r\033[K" + DIM(msg[:120]))
+        sys.stderr.flush()
+
+
+def clear_status():
+    global _status_shown
+    if _status_shown:
+        sys.stderr.write("\r\033[K")
+        sys.stderr.flush()
+        _status_shown = False
+
+
+def info(msg):
+    clear_status()
+    print(DIM(msg), flush=True)
 
 
 # ---------------------------------------------------------------- config
@@ -130,13 +161,15 @@ def size_of(path):
             return os.lstat(path).st_size
         except OSError:
             return 0
-    total = 0
+    total = n = 0
     for root, _, files in os.walk(path):
         for f in files:
+            n += 1
             try:
                 total += os.lstat(os.path.join(root, f)).st_size
             except OSError:
                 pass
+        status(f"  measuring {path}: {n} files, {human(total)} so far")
     return total
 
 
@@ -147,15 +180,17 @@ def human(n):
         n /= 1024
 
 
-def find_orphans(root, known, ancestors, ignore):
-    """Walk root; anything neither a known torrent path nor a parent of one is an orphan."""
-    orphans = []
+def find_orphans(root, known, ancestors, ignore, counter):
+    """Yield orphans under root: anything neither a known torrent path nor a parent of one."""
     try:
         entries = sorted(os.scandir(root), key=lambda e: e.name)
     except OSError as e:
+        clear_status()
         print(YELLOW(f"  ! cannot read {root}: {e}"), file=sys.stderr)
-        return orphans
+        return
     for e in entries:
+        counter[0] += 1
+        status(f"  scanned {counter[0]} entries... {e.path}")
         if e.name in ignore:
             continue
         p = os.path.normpath(e.path)
@@ -164,10 +199,9 @@ def find_orphans(root, known, ancestors, ignore):
         if p in known:
             continue
         if p in ancestors and e.is_dir(follow_symlinks=False):
-            orphans += find_orphans(e.path, known, ancestors, ignore)
+            yield from find_orphans(e.path, known, ancestors, ignore, counter)
             continue
-        orphans.append(e.path)
-    return orphans
+        yield e.path
 
 
 # ---------------------------------------------------------------- main
@@ -227,9 +261,14 @@ def main():
     mappings = {(k.rstrip("/") or "/"): os.path.expanduser(v) for k, v in mappings.items()}
 
     auth = f"{user}:{password}" if user else None
+    info(f"Querying Transmission RPC at {url} ...")
     session = rpc(url, "session-get", {}, auth)
+    info(f"  connected (Transmission {session.get('version', '?')}); fetching torrent list ...")
     torrents = rpc(url, "torrent-get", {"fields": ["name", "downloadDir"]}, auth)["torrents"]
-    print(BOLD(f"{len(torrents)} torrents known to Transmission"))
+    print(BOLD(f"{len(torrents)} torrents known to Transmission"), flush=True)
+    info("Path mapping (container -> host):")
+    for cont, host in sorted(mappings.items()):
+        info(f"  {cont} -> {host}" + ("  [excluded]" if any(cont == x or cont.startswith(x.rstrip('/') + '/') for x in (args.exclude or cfg.get('exclude', []))) else ""))
 
     known, ancestors, unmapped = set(), set(), set()
     for t in torrents:
@@ -271,15 +310,19 @@ def main():
 
     all_orphans = []
     for root in roots:
-        print(f"\n{BLUE('Scanning')} {root}")
-        orphans = find_orphans(root, known, ancestors, ignore)
-        if not orphans:
-            print(GREEN("  ✓ nothing orphaned"))
-        for o in orphans:
+        clear_status()
+        print(f"\n{BLUE('Scanning')} {root}", flush=True)
+        counter, found = [0], 0
+        for o in find_orphans(root, known, ancestors, ignore, counter):
+            found += 1
             kind = "dir " if os.path.isdir(o) else "file"
             sz = size_of(o)
             all_orphans.append((o, sz))
-            print(f"  {RED('✗')} {YELLOW(kind)} {o}  {DIM('(' + human(sz) + ')')}")
+            clear_status()
+            print(f"  {RED('✗')} {YELLOW(kind)} {o}  {DIM('(' + human(sz) + ')')}", flush=True)
+        clear_status()
+        print(DIM(f"  {counter[0]} entries checked, {found} orphan(s)") if found else
+              GREEN(f"  ✓ nothing orphaned ({counter[0]} entries checked)"), flush=True)
 
     total = sum(s for _, s in all_orphans)
     print()
