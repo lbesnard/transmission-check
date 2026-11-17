@@ -13,13 +13,30 @@ block for you to review and run yourself.
 No dependencies, Python >= 3.11.
 
 ```sh
-# with uv
-uv run transmission-check --help
-uv tool install .            # optional: install as a `transmission-check` command
+# install straight from git as a `transmission-check` command (recommended)
+uv tool install git+https://github.com/<user>/transmission-check
+transmission-check --help
 
-# or directly
+# run once without installing
+uvx --from git+https://github.com/<user>/transmission-check transmission-check --help
+
+# pin a branch, tag or commit
+uv tool install git+https://github.com/<user>/transmission-check@v0.1.0
+
+# from a local clone
+git clone https://github.com/<user>/transmission-check && cd transmission-check
+uv tool install .            # or: uv run transmission-check --help
+
+# or directly, no install
 python3 transmission_orphans.py --help
 ```
+
+Replace `<user>` with the GitHub account hosting the repo (use an `ssh://git@github.com/...`
+URL for a private repo). Update with `uv tool upgrade transmission-check`, remove with
+`uv tool uninstall transmission-check`.
+
+A tool install has no working directory to find `./transmission-check.toml` in, so put
+your config at `~/.config/transmission-check/config.toml` or pass `--config`.
 
 ## Quick start
 
