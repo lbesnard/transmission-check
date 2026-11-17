@@ -191,6 +191,9 @@ def main():
                     help="derive mappings from this container's bind mounts via `docker inspect`")
     ap.add_argument("--scan", action="append", metavar="CONTAINER_DIR",
                     help="container dir(s) to scan, repeatable (default: every mapped dir)")
+    ap.add_argument("--exclude", action="append", metavar="CONTAINER_DIR",
+                    help="container dir(s) never scanned, repeatable (e.g. /config). With --docker-container, "
+                         "only mounts that hold downloads are scanned anyway")
     ap.add_argument("--ignore", action="append", metavar="NAME",
                     help="entry name to never report, repeatable (e.g. lost+found)")
     ap.add_argument("--rm-list", action="store_true", help="also print an `rm -rf` block (not executed)")
@@ -205,6 +208,7 @@ def main():
     ignore = set(args.ignore or cfg.get("ignore", [])) | {"lost+found", ".stfolder"}
     container = args.docker_container or cfg.get("docker_container")
 
+    auto_mappings = False
     if args.map:
         mappings = {}
         for m in args.map:
@@ -216,6 +220,7 @@ def main():
         mappings = dict(cfg["paths"])
     elif container:
         mappings = docker_mounts(container)
+        auto_mappings = True
     else:
         die("no path mapping. Give --map, a [paths] table in the config, or --docker-container "
             "(see --help)")
@@ -240,10 +245,23 @@ def main():
     for d in sorted(unmapped):
         print(YELLOW(f"  ! no mapping covers {d}: its torrents are ignored"))
 
+    exclude = [x.rstrip("/") for x in (args.exclude or cfg.get("exclude", []))]
+
+    def excluded(cont):
+        return any(cont == x or cont.startswith(x + "/") for x in exclude)
+
     if scan:
         roots = sorted({h for h in (to_host(x, mappings) for x in scan) if h and os.path.isdir(h)})
-    else:  # every mapped folder, even ones without torrents (everything in them is an orphan)
-        roots = sorted({h for h in mappings.values() if os.path.isdir(h)})
+    else:
+        candidates = {cont: host for cont, host in mappings.items() if not excluded(cont)}
+        if auto_mappings:
+            # docker mounts include /config, /watch, ...: only keep mounts that hold downloads
+            used = {t["downloadDir"] for t in torrents} | {session.get("download-dir")}
+            if session.get("incomplete-dir-enabled"):
+                used.add(session.get("incomplete-dir"))
+            candidates = {cont: host for cont, host in candidates.items()
+                          if any(u and (u == cont or u.startswith(cont.rstrip("/") + "/")) for u in used)}
+        roots = sorted({h for h in candidates.values() if os.path.isdir(h)})
     if session.get("incomplete-dir-enabled"):
         inc = to_host(session["incomplete-dir"], mappings)
         if inc and os.path.isdir(inc) and not any(inc == r or inc.startswith(r + "/") for r in roots):

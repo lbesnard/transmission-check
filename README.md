@@ -32,13 +32,28 @@ python3 transmission_orphans.py --help
 ```
 
 Replace `<user>` with the GitHub account hosting the repo (use an `ssh://git@github.com/...`
-URL for a private repo). Update with `uv tool upgrade transmission-check`, remove with
-`uv tool uninstall transmission-check`.
+URL for a private repo).
+
+Update to the latest version, or remove it:
+
+```sh
+uv tool upgrade transmission-check
+uv tool uninstall transmission-check
+```
 
 A tool install has no working directory to find `./transmission-check.toml` in, so put
 your config at `~/.config/transmission-check/config.toml` or pass `--config`.
 
 ## Quick start
+
+Simplest, no config file: run it on the machine hosting Docker and give it the name of
+the Transmission container. The path mapping is read from the container's bind mounts.
+
+```sh
+transmission-check --docker-container transmission
+```
+
+With a config file instead:
 
 ```sh
 cp config.example.toml transmission-check.toml
@@ -76,6 +91,7 @@ See [`config.example.toml`](config.example.toml) for every key.
 | `[paths]`, `--map C=H` | container → host path mapping (see below) |
 | `docker_container`, `--docker-container` | derive the mapping from `docker inspect` |
 | `scan`, `--scan` | container dirs to scan (default: every mapped dir) |
+| `exclude`, `--exclude` | container dirs never scanned (e.g. `/config`) |
 | `ignore`, `--ignore` | entry names never reported (`lost+found`, `.stfolder` always ignored) |
 | `--rm-list` | also print a reviewable `rm -rf` block |
 
@@ -106,7 +122,8 @@ one of three ways (highest priority first):
 1. `--map /downloads=/mnt/torrent/downloads` (repeatable)
 2. the `[paths]` table in the config
 3. `--docker-container transmission`, which reads the container's bind mounts via
-   `docker inspect`, so nothing needs to be kept in sync with your compose file
+   `docker inspect`, so nothing needs to be kept in sync with your compose file. Only
+   mounts that hold downloads are scanned (so `/config` and `/watch` are skipped)
 
 If a torrent's download dir isn't covered by any mapping, the script warns and ignores it.
 

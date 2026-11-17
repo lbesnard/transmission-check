@@ -9,6 +9,9 @@ url = "http://localhost:9091/transmission/rpc"
 # user = "me"
 # password = "secret"
 
+# Container dirs never scanned (an excluded mapping is skipped entirely).
+# exclude = ["/config", "/watch"]
+
 # Names never reported as orphans (lost+found and .stfolder are always ignored).
 # ignore = ["@eaDir", ".DS_Store"]
 
