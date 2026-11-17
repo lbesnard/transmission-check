@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtualenvs / uv
+.venv/
+venv/
+
+# Local config (may contain credentials); config.example.toml stays tracked
+transmission-check.toml
