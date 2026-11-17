@@ -91,8 +91,8 @@ See [`config.example.toml`](config.example.toml) for every key.
 | `[paths]`, `--map C=H` | container → host path mapping (see below) |
 | `docker_container`, `--docker-container` | derive the mapping from `docker inspect` |
 | `scan`, `--scan` | container dirs to scan (default: every mapped dir) |
-| `exclude`, `--exclude` | container dirs never scanned (e.g. `/config`) |
-| `ignore`, `--ignore` | entry names never reported (`lost+found`, `.stfolder` always ignored) |
+| `exclude`, `--exclude` | container paths never scanned/reported: a mount (`/config`) or subfolder (`/data/MUSIC_TO_BEET_IMPORT`) |
+| `ignore`, `--ignore` | entry names skipped at any depth (`lost+found`, `.stfolder` always ignored) |
 | `--rm-list` | also print a reviewable `rm -rf` block |
 
 ## Container paths vs host paths

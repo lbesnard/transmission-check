@@ -9,10 +9,10 @@ url = "http://localhost:9091/transmission/rpc"
 # user = "me"
 # password = "secret"
 
-# Container dirs never scanned (an excluded mapping is skipped entirely).
-# exclude = ["/config", "/watch"]
+# Container paths never scanned or reported: a whole mount or a single subfolder.
+# exclude = ["/config", "/data/MUSIC_TO_BEET_IMPORT"]
 
-# Names never reported as orphans (lost+found and .stfolder are always ignored).
+# Entry NAMES skipped at any depth (use exclude for one specific path) (lost+found and .stfolder are always ignored).
 # ignore = ["@eaDir", ".DS_Store"]
 
 # Container dirs to scan. Default: every host dir listed in [paths] below.

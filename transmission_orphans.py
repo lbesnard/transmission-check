@@ -180,7 +180,7 @@ def human(n):
         n /= 1024
 
 
-def find_orphans(root, known, ancestors, ignore, counter):
+def find_orphans(root, known, ancestors, ignore, counter, skip=()):
     """Yield orphans under root: anything neither a known torrent path nor a parent of one."""
     try:
         entries = sorted(os.scandir(root), key=lambda e: e.name)
@@ -194,12 +194,14 @@ def find_orphans(root, known, ancestors, ignore, counter):
         if e.name in ignore:
             continue
         p = os.path.normpath(e.path)
+        if p in skip:
+            continue
         if p.endswith(".part"):  # transmission's "rename partial files"
             p = p[:-5]
         if p in known:
             continue
         if p in ancestors and e.is_dir(follow_symlinks=False):
-            yield from find_orphans(e.path, known, ancestors, ignore, counter)
+            yield from find_orphans(e.path, known, ancestors, ignore, counter, skip)
             continue
         yield e.path
 
@@ -226,10 +228,11 @@ def main():
     ap.add_argument("--scan", action="append", metavar="CONTAINER_DIR",
                     help="container dir(s) to scan, repeatable (default: every mapped dir)")
     ap.add_argument("--exclude", action="append", metavar="CONTAINER_DIR",
-                    help="container dir(s) never scanned, repeatable (e.g. /config). With --docker-container, "
+                    help="container dir(s) never scanned or reported, repeatable: a whole mount (/config) "
+                         "or a subfolder (/data/MUSIC_TO_BEET_IMPORT). With --docker-container, "
                          "only mounts that hold downloads are scanned anyway")
     ap.add_argument("--ignore", action="append", metavar="NAME",
-                    help="entry name to never report, repeatable (e.g. lost+found)")
+                    help="entry NAME to skip at any depth, repeatable (e.g. @eaDir); use --exclude for a specific path")
     ap.add_argument("--rm-list", action="store_true", help="also print an `rm -rf` block (not executed)")
     args = ap.parse_args()
 
@@ -308,12 +311,13 @@ def main():
     if not roots:
         die("none of the mapped host folders exist; check your mappings")
 
+    skip = {h for h in (to_host(x, mappings) for x in exclude) if h}  # excluded subfolders
     all_orphans = []
     for root in roots:
         clear_status()
         print(f"\n{BLUE('Scanning')} {root}", flush=True)
         counter, found = [0], 0
-        for o in find_orphans(root, known, ancestors, ignore, counter):
+        for o in find_orphans(root, known, ancestors, ignore, counter, skip):
             found += 1
             kind = "dir " if os.path.isdir(o) else "file"
             sz = size_of(o)
