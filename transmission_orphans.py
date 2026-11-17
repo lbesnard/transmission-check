@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""List files/folders in Transmission's data folders that Transmission doesn't know about.
+
+Nothing is ever deleted: orphans are only printed (and, with --rm-list, as an rm block
+you can review).
+
+CONFIG
+  Settings come from a TOML file, and any command-line option overrides it.
+  Config lookup order (first found wins):
+    --config FILE, ./transmission-check.toml, ~/.config/transmission-check/config.toml
+  See config.example.toml for every key.
+
+PATH MAPPING (container vs host)
+  Transmission reports paths as seen inside its container (/downloads/foo). This script
+  runs on the host, where the same folder is e.g. /mnt/torrent/downloads/foo. A mapping
+  CONTAINER=HOST tells it how to translate; the mapped host folders are also the roots
+  that get scanned. Three ways to provide mappings (highest priority first):
+    1. --map /downloads=/mnt/torrent/downloads   (repeatable)
+    2. [paths] table in the config file
+    3. --docker-container transmission : read the bind mounts from `docker inspect`
+       (always correct, nothing to keep in sync with docker-compose)
+"""
+import argparse
+import base64
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+try:
+    import tomllib
+except ImportError:  # Python < 3.11
+    tomllib = None
+
+USE_COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+
+
+def c(text, code):
+    return f"\033[{code}m{text}\033[0m" if USE_COLOR else str(text)
+
+
+RED = lambda t: c(t, "1;31")
+GREEN = lambda t: c(t, "32")
+YELLOW = lambda t: c(t, "33")
+BLUE = lambda t: c(t, "1;34")
+DIM = lambda t: c(t, "2")
+BOLD = lambda t: c(t, "1")
+
+
+def die(msg):
+    sys.exit(RED(f"error: {msg}"))
+
+
+# ---------------------------------------------------------------- config
+
+def load_config(path):
+    candidates = [path] if path else [
+        "transmission-check.toml",
+        os.path.expanduser("~/.config/transmission-check/config.toml"),
+    ]
+    for p in candidates:
+        if p and os.path.isfile(p):
+            if tomllib is None:
+                die("reading a config file needs Python >= 3.11 (or pass everything as options)")
+            with open(p, "rb") as f:
+                print(DIM(f"config: {p}"))
+                return tomllib.load(f)
+    if path:
+        die(f"config file not found: {path}")
+    return {}
+
+
+def docker_mounts(container):
+    """Bind mounts of a running container as {container_path: host_path}."""
+    try:
+        out = subprocess.run(
+            ["docker", "inspect", "-f", "{{json .Mounts}}", container],
+            check=True, capture_output=True, text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        die(f"`docker inspect {container}` failed: {getattr(e, 'stderr', e)}")
+    return {m["Destination"]: m["Source"] for m in json.loads(out) if m.get("Type") == "bind"}
+
+
+# ---------------------------------------------------------------- transmission rpc
+
+def rpc(url, method, arguments, auth):
+    session_id = ""
+    for _ in range(2):
+        req = urllib.request.Request(
+            url, data=json.dumps({"method": method, "arguments": arguments}).encode()
+        )
+        req.add_header("Content-Type", "application/json")
+        req.add_header("X-Transmission-Session-Id", session_id)
+        if auth:
+            req.add_header("Authorization", "Basic " + base64.b64encode(auth.encode()).decode())
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = json.load(r)
+            if data.get("result") != "success":
+                die(f"RPC error: {data.get('result')}")
+            return data["arguments"]
+        except urllib.error.HTTPError as e:
+            if e.code == 409:  # CSRF handshake: retry with the id Transmission gives us
+                session_id = e.headers.get("X-Transmission-Session-Id", "")
+                continue
+            if e.code == 401:
+                die("401 Unauthorized: set user/password (config, options or env)")
+            raise
+        except urllib.error.URLError as e:
+            die(f"cannot reach Transmission at {url}: {e.reason}")
+    die("session-id handshake failed")
+
+
+# ---------------------------------------------------------------- scanning
+
+def to_host(path, mappings):
+    """Container path -> host path using the longest matching prefix."""
+    for cont, host in sorted(mappings.items(), key=lambda m: -len(m[0])):
+        if path == cont or path.startswith(cont.rstrip("/") + "/"):
+            return os.path.normpath(host + path[len(cont):])
+    return None
+
+
+def size_of(path):
+    if os.path.isfile(path) or os.path.islink(path):
+        try:
+            return os.lstat(path).st_size
+        except OSError:
+            return 0
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def human(n):
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+
+
+def find_orphans(root, known, ancestors, ignore):
+    """Walk root; anything neither a known torrent path nor a parent of one is an orphan."""
+    orphans = []
+    try:
+        entries = sorted(os.scandir(root), key=lambda e: e.name)
+    except OSError as e:
+        print(YELLOW(f"  ! cannot read {root}: {e}"), file=sys.stderr)
+        return orphans
+    for e in entries:
+        if e.name in ignore:
+            continue
+        p = os.path.normpath(e.path)
+        if p.endswith(".part"):  # transmission's "rename partial files"
+            p = p[:-5]
+        if p in known:
+            continue
+        if p in ancestors and e.is_dir(follow_symlinks=False):
+            orphans += find_orphans(e.path, known, ancestors, ignore)
+            continue
+        orphans.append(e.path)
+    return orphans
+
+
+# ---------------------------------------------------------------- main
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="examples:\n"
+               "  %(prog)s --docker-container transmission\n"
+               "  %(prog)s --url http://brownfunk.lan:9091/transmission/rpc -u me "
+               "--map /downloads=/mnt/t/downloads --map /data=/mnt/t/data\n"
+               "  %(prog)s --config ~/my.toml --rm-list",
+    )
+    ap.add_argument("--config", metavar="FILE", help="TOML config file (see config.example.toml)")
+    ap.add_argument("--url", help="Transmission RPC URL (default http://localhost:9091/transmission/rpc)")
+    ap.add_argument("-u", "--user", help="RPC user (or env TRANSMISSION_USER)")
+    ap.add_argument("-p", "--password", help="RPC password (or env TRANSMISSION_PASS; prefer env/config over the command line)")
+    ap.add_argument("--map", action="append", metavar="CONTAINER=HOST",
+                    help="container->host path mapping, repeatable; replaces the config's [paths]")
+    ap.add_argument("--docker-container", metavar="NAME",
+                    help="derive mappings from this container's bind mounts via `docker inspect`")
+    ap.add_argument("--scan", action="append", metavar="CONTAINER_DIR",
+                    help="container dir(s) to scan, repeatable (default: every mapped dir)")
+    ap.add_argument("--ignore", action="append", metavar="NAME",
+                    help="entry name to never report, repeatable (e.g. lost+found)")
+    ap.add_argument("--rm-list", action="store_true", help="also print an `rm -rf` block (not executed)")
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+
+    url = args.url or cfg.get("url") or "http://localhost:9091/transmission/rpc"
+    user = args.user or os.environ.get("TRANSMISSION_USER") or cfg.get("user")
+    password = args.password or os.environ.get("TRANSMISSION_PASS") or cfg.get("password")
+    scan = args.scan or cfg.get("scan")
+    ignore = set(args.ignore or cfg.get("ignore", [])) | {"lost+found", ".stfolder"}
+    container = args.docker_container or cfg.get("docker_container")
+
+    if args.map:
+        mappings = {}
+        for m in args.map:
+            cont, sep, host = m.partition("=")
+            if not sep or not host:
+                die(f"bad --map '{m}', expected CONTAINER=HOST")
+            mappings[cont] = host
+    elif cfg.get("paths"):
+        mappings = dict(cfg["paths"])
+    elif container:
+        mappings = docker_mounts(container)
+    else:
+        die("no path mapping. Give --map, a [paths] table in the config, or --docker-container "
+            "(see --help)")
+    mappings = {(k.rstrip("/") or "/"): os.path.expanduser(v) for k, v in mappings.items()}
+
+    auth = f"{user}:{password}" if user else None
+    session = rpc(url, "session-get", {}, auth)
+    torrents = rpc(url, "torrent-get", {"fields": ["name", "downloadDir"]}, auth)["torrents"]
+    print(BOLD(f"{len(torrents)} torrents known to Transmission"))
+
+    known, ancestors, unmapped = set(), set(), set()
+    for t in torrents:
+        host = to_host(os.path.join(t["downloadDir"], t["name"]), mappings)
+        if host is None:
+            unmapped.add(t["downloadDir"])
+            continue
+        known.add(host)
+        parent = os.path.dirname(host)
+        while parent not in ancestors and parent != "/":
+            ancestors.add(parent)
+            parent = os.path.dirname(parent)
+    for d in sorted(unmapped):
+        print(YELLOW(f"  ! no mapping covers {d}: its torrents are ignored"))
+
+    if scan:
+        roots = sorted({h for h in (to_host(x, mappings) for x in scan) if h and os.path.isdir(h)})
+    else:  # every mapped folder, even ones without torrents (everything in them is an orphan)
+        roots = sorted({h for h in mappings.values() if os.path.isdir(h)})
+    if session.get("incomplete-dir-enabled"):
+        inc = to_host(session["incomplete-dir"], mappings)
+        if inc and os.path.isdir(inc) and not any(inc == r or inc.startswith(r + "/") for r in roots):
+            roots.append(inc)
+    if not roots:
+        die("none of the mapped host folders exist; check your mappings")
+
+    all_orphans = []
+    for root in roots:
+        print(f"\n{BLUE('Scanning')} {root}")
+        orphans = find_orphans(root, known, ancestors, ignore)
+        if not orphans:
+            print(GREEN("  ✓ nothing orphaned"))
+        for o in orphans:
+            kind = "dir " if os.path.isdir(o) else "file"
+            sz = size_of(o)
+            all_orphans.append((o, sz))
+            print(f"  {RED('✗')} {YELLOW(kind)} {o}  {DIM('(' + human(sz) + ')')}")
+
+    total = sum(s for _, s in all_orphans)
+    print()
+    if all_orphans:
+        print(RED(BOLD(f"{len(all_orphans)} orphan(s), {human(total)} reclaimable")) + DIM(" — review before deleting"))
+        if args.rm_list:
+            print(DIM("\n# review, then run:"))
+            for o, _ in all_orphans:
+                print("rm -rf -- '" + o.replace("'", "'\\''") + "'")
+    else:
+        print(GREEN(BOLD("All clean: every file is tracked by Transmission")))
+
+
+if __name__ == "__main__":
+    main()

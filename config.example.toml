@@ -1,0 +1,29 @@
+# Copy to ./transmission-check.toml or ~/.config/transmission-check/config.toml
+# Every key is optional; command-line options override what is set here.
+
+# Transmission RPC. With gluetun this is gluetun's published port 9091.
+url = "http://localhost:9091/transmission/rpc"
+
+# Only needed if RPC authentication is enabled. Prefer the env vars
+# TRANSMISSION_USER / TRANSMISSION_PASS over storing a password here.
+# user = "me"
+# password = "secret"
+
+# Names never reported as orphans (lost+found and .stfolder are always ignored).
+# ignore = ["@eaDir", ".DS_Store"]
+
+# Container dirs to scan. Default: every host dir listed in [paths] below.
+# scan = ["/downloads"]
+
+# --- Path mapping --------------------------------------------------------------
+# Transmission reports paths as seen INSIDE its container; this script runs on the
+# HOST. "container path" = "host path", i.e. the two sides of the compose volume:
+#     - $TORRENT_PATH/downloads:/downloads   ->   "/downloads" = "<TORRENT_PATH>/downloads"
+# The host dirs here are the roots that get scanned.
+[paths]
+"/downloads" = "/media/you/disk/torrent/transmission/downloads"
+"/data"      = "/media/you/disk/torrent/transmission/data"
+
+# Alternative to [paths]: read the mounts straight from docker, nothing to keep in sync.
+# (Used only if [paths] and --map are absent.)
+# docker_container = "transmission"
